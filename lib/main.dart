@@ -1,1375 +1,942 @@
-import 'dart:ui';
-import 'package:flutter/material.dart';
+package com.example.llama
 
-void main() => runApp(const NaseemApp());
+import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ResolveInfo
+import android.graphics.Color
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.StatFs
+import android.provider.OpenableColumns
+import android.provider.Settings
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.widget.ArrayAdapter
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.arm.aichat.AiChat
+import com.arm.aichat.InferenceEngine
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.card.MaterialCardView
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+import java.net.URLEncoder
+import java.text.DecimalFormat
+import java.util.Locale
 
-const Color _background = Color(0xFF0B1220);
-const Color _mint = Color(0xFF9BE5D8);
-const Color _lavender = Color(0xFFC5B8FF);
-const Color _softBlue = Color(0xFF9BCBFF);
-const Color _peach = Color(0xFFFFCBAA);
+/**
+ * NOUR - local AI assistant for the official llama.cpp Android binding.
+ *
+ * Place this file at:
+ * examples/llama.android/app/src/main/java/com/example/llama/MainActivity.kt
+ * in the official ggml-org/llama.cpp repository.
+ */
+class MainActivity : AppCompatActivity() {
 
-class NaseemApp extends StatelessWidget {
-  const NaseemApp({super.key});
+    private val bg = Color.rgb(10, 14, 25)
+    private val panel = Color.rgb(19, 27, 44)
+    private val panelRaised = Color.rgb(27, 38, 59)
+    private val textPrimary = Color.rgb(239, 243, 255)
+    private val textSecondary = Color.rgb(158, 174, 202)
+    private val accent = Color.rgb(128, 153, 255)
+    private val userBubble = Color.rgb(42, 59, 95)
+    private val aiBubble = Color.rgb(20, 30, 48)
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'نسيم',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        brightness: Brightness.dark,
-        scaffoldBackgroundColor: _background,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _mint,
-          brightness: Brightness.dark,
-        ),
-        snackBarTheme: SnackBarThemeData(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF253246),
-          contentTextStyle: const TextStyle(color: Colors.white),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-        ),
-      ),
-      builder: (context, child) => Directionality(
-        textDirection: TextDirection.rtl,
-        child: child ?? const SizedBox.shrink(),
-      ),
-      home: const AppShell(),
-    );
-  }
-}
+    private lateinit var root: LinearLayout
+    private lateinit var statusText: TextView
+    private lateinit var modelText: TextView
+    private lateinit var messagesScroll: ScrollView
+    private lateinit var messagesContainer: LinearLayout
+    private lateinit var inputText: EditText
+    private lateinit var sendButton: MaterialButton
+    private lateinit var addModelButton: MaterialButton
+    private lateinit var modelListButton: MaterialButton
+    private lateinit var toolsButton: MaterialButton
 
-class _TaskItem {
-  _TaskItem({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    required this.tint,
-    this.done = false,
-  });
+    private var engine: InferenceEngine? = null
+    private var activeModel: File? = null
+    private var generationJob: Job? = null
+    private var isLoading = false
+    private var isGenerating = false
+    private var torchEnabled = false
+    private var requestedTorchState: Boolean? = null
+    private var pendingExportText = ""
+    private var pendingExportName = "NOUR-response.txt"
+    private val modelPrefs by lazy { getSharedPreferences("nour_models", MODE_PRIVATE) }
+    private val modelsDir by lazy { File(filesDir, "models").apply { mkdirs() } }
 
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final Color tint;
-  bool done;
-}
+    private data class ChatEntry(val role: String, val text: String)
+    private val visibleConversation = mutableListOf<ChatEntry>()
 
-class AppShell extends StatefulWidget {
-  const AppShell({super.key});
-
-  @override
-  State<AppShell> createState() => _AppShellState();
-}
-
-class _AppShellState extends State<AppShell> {
-  int _selectedIndex = 0;
-  String _query = '';
-  bool _focusMode = false;
-  bool _notifications = true;
-  bool _sounds = false;
-  final TextEditingController _searchController = TextEditingController();
-
-  final List<_TaskItem> _tasks = [
-    _TaskItem(
-      title: 'مراجعة أهداف اليوم',
-      subtitle: 'الصباح · 10 دقائق',
-      icon: Icons.checklist_rounded,
-      tint: _mint,
-    ),
-    _TaskItem(
-      title: 'قراءة عشر صفحات',
-      subtitle: 'وقت هادئ لنفسك',
-      icon: Icons.menu_book_rounded,
-      tint: _lavender,
-    ),
-    _TaskItem(
-      title: 'المشي قليلًا',
-      subtitle: 'استراحة وتجديد للطاقة',
-      icon: Icons.directions_walk_rounded,
-      tint: _peach,
-    ),
-    _TaskItem(
-      title: 'ترتيب مساحة العمل',
-      subtitle: 'خطوة بسيطة ومفيدة',
-      icon: Icons.dashboard_customize_rounded,
-      tint: _softBlue,
-    ),
-  ];
-
-  int get _completedCount => _tasks.where((task) => task.done).length;
-
-  List<_TaskItem> get _filteredTasks {
-    final query = _query.trim().toLowerCase();
-    if (query.isEmpty) return _tasks;
-    return _tasks
-        .where((task) => task.title.toLowerCase().contains(query))
-        .toList();
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
-  }
-
-  void _toggleTask(_TaskItem task, bool done) {
-    setState(() => task.done = done);
-    if (done && _sounds) {
-      // لا يحتاج التطبيق إلى مكتبة صوتية خارجية؛ هذا الخيار محفوظ كإعداد فقط.
+    private val pickModel = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importModel(uri)
     }
-  }
 
-  Future<void> _addTask() async {
-    final title = await showDialog<String>(
-      context: context,
-      barrierColor: Colors.black.withOpacity(0.58),
-      builder: (context) => const _AddTaskDialog(),
-    );
-
-    if (!mounted || title == null || title.trim().isEmpty) return;
-
-    setState(() {
-      _tasks.insert(
-        0,
-        _TaskItem(
-          title: title.trim(),
-          subtitle: 'أُضيفت للتو · على راحتك',
-          icon: Icons.task_alt_rounded,
-          tint: _mint,
-        ),
-      );
-      _query = '';
-      _searchController.clear();
-    });
-    _showMessage('تمت إضافة المهمة بنجاح');
-  }
-
-  void _toggleFocusMode() {
-    setState(() => _focusMode = !_focusMode);
-    _showMessage(
-      _focusMode
-          ? 'تم تفعيل وضع التركيز. خذ وقتك وابدأ بهدوء.'
-          : 'تم إيقاف وضع التركيز.',
-    );
-  }
-
-  void _showMessage(String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
-
-  void _navigateTo(int index) {
-    setState(() => _selectedIndex = index);
-  }
-
-  Widget _currentPage() {
-    switch (_selectedIndex) {
-      case 1:
-        return TasksScreen(
-          tasks: _filteredTasks,
-          searchController: _searchController,
-          onSearch: (value) => setState(() => _query = value),
-          onAdd: _addTask,
-          onToggle: _toggleTask,
-        );
-      case 2:
-        return SettingsScreen(
-          focusMode: _focusMode,
-          notifications: _notifications,
-          sounds: _sounds,
-          onFocusChanged: (_) => _toggleFocusMode(),
-          onNotificationsChanged: (value) =>
-              setState(() => _notifications = value),
-          onSoundsChanged: (value) => setState(() => _sounds = value),
-        );
-      default:
-        return HomeScreen(
-          tasks: _tasks,
-          completedCount: _completedCount,
-          focusMode: _focusMode,
-          onToggle: _toggleTask,
-          onAdd: _addTask,
-          onFocus: _toggleFocusMode,
-          onNavigate: _navigateTo,
-        );
+    private val exportFile = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                try {
+                    contentResolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use { it.write(pendingExportText) }
+                    withContext(Dispatchers.Main) { toast("تم حفظ الملف.") }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) { toast("تعذر حفظ الملف: ${e.message ?: "خطأ غير معروف"}") }
+                }
+            }
+        }
     }
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _background,
-      extendBody: true,
-      body: Stack(
-        children: [
-          const _AmbientBackground(),
-          SafeArea(child: _currentPage()),
-        ],
-      ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
-          child: GlassCard(
-            radius: 24,
-            padding: const EdgeInsets.all(6),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _NavigationItem(
-                    icon: Icons.space_dashboard_rounded,
-                    label: 'الرئيسية',
-                    selected: _selectedIndex == 0,
-                    onTap: () => _navigateTo(0),
-                  ),
-                ),
-                Expanded(
-                  child: _NavigationItem(
-                    icon: Icons.check_circle_outline_rounded,
-                    label: 'المهام',
-                    selected: _selectedIndex == 1,
-                    onTap: () => _navigateTo(1),
-                  ),
-                ),
-                Expanded(
-                  child: _NavigationItem(
-                    icon: Icons.tune_rounded,
-                    label: 'الإعدادات',
-                    selected: _selectedIndex == 2,
-                    onTap: () => _navigateTo(2),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+    private val askForCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            val wanted = requestedTorchState
+            requestedTorchState = null
+            if (wanted == null) changeTorch() else setTorch(wanted)
+        } else {
+            requestedTorchState = null
+            toast("لم تمنح إذن الكاميرا، لذلك لم أستطع تشغيل الفلاش.")
+        }
+    }
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({
-    super.key,
-    required this.tasks,
-    required this.completedCount,
-    required this.focusMode,
-    required this.onToggle,
-    required this.onAdd,
-    required this.onFocus,
-    required this.onNavigate,
-  });
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        supportActionBar?.hide()
+        window.statusBarColor = bg
+        window.navigationBarColor = bg
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        buildInterface()
+        addBubble("assistant", "أهلاً بيك، أني نَوْر. أضف ملف GGUF من زر «إضافة نموذج»، حمّله، وبعدها تگدر تحچي وياه. أگدر أيضاً أفتح إعدادات الهاتف والتطبيقات من أدوات الهاتف، ضمن الصلاحيات اللي يسمح بيها Android.")
 
-  final List<_TaskItem> tasks;
-  final int completedCount;
-  final bool focusMode;
-  final void Function(_TaskItem task, bool done) onToggle;
-  final VoidCallback onAdd;
-  final VoidCallback onFocus;
-  final ValueChanged<int> onNavigate;
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val localEngine = AiChat.getInferenceEngine(applicationContext)
+                withContext(Dispatchers.Main) {
+                    engine = localEngine
+                    statusText.text = "المحرك جاهز، بانتظار تحميل نموذج"
+                }
+                awaitEngineReady(localEngine)
+                val lastPath = modelPrefs.getString("active_model_path", null)
+                val lastModel = lastPath?.let { File(it) }?.takeIf { it.isFile && it.extension.equals("gguf", true) }
+                if (lastModel != null) activateModel(lastModel, clearChat = false)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    statusText.text = "تعذر تهيئة المحرك"
+                    toast("تعذر تشغيل محرك الذكاء الاصطناعي: ${e.message ?: "راجع بناء التطبيق"}")
+                }
+            }
+        }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    final total = tasks.length;
-    final remaining = total - completedCount;
-    final progress = total == 0 ? 0.0 : completedCount / total;
+    private fun buildInterface() {
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(14), dp(12), dp(14), dp(8))
+        }
+        setContentView(root)
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 124),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(17),
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [_mint, _softBlue],
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: _mint.withOpacity(0.12),
-                      blurRadius: 22,
-                      spreadRadius: 1,
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.spa_rounded,
-                  color: Color(0xFF12212B),
-                  size: 27,
-                ),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'نَسيم',
-                      style: TextStyle(
-                        fontSize: 21,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 0.2,
-                      ),
-                    ),
-                    SizedBox(height: 2),
-                    Text(
-                      'مساحة صغيرة ليوم أهدأ',
-                      style: TextStyle(fontSize: 12, color: Colors.white60),
-                    ),
-                  ],
-                ),
-              ),
-              GlassCard(
-                radius: 17,
-                padding: EdgeInsets.zero,
-                child: IconButton(
-                  tooltip: 'البحث في المهام',
-                  onPressed: () => onNavigate(1),
-                  icon: const Icon(Icons.search_rounded),
-                  color: Colors.white70,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 28),
-          GlassCard(
-            radius: 28,
-            padding: const EdgeInsets.all(22),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'رتّب يومك،\nعلى مهل.',
-                            style: TextStyle(
-                              fontSize: 28,
-                              height: 1.25,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -0.4,
-                            ),
-                          ),
-                          SizedBox(height: 10),
-                          Text(
-                            'مو مطلوب منك تنجز كل شيء.\nابدأ بخطوة صغيرة تكفي لهذا اليوم.',
-                            style: TextStyle(
-                              fontSize: 13,
-                              height: 1.7,
-                              color: Colors.white70,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: _mint.withOpacity(0.10),
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: _mint.withOpacity(0.16)),
-                      ),
-                      child: Icon(
-                        focusMode ? Icons.self_improvement_rounded : Icons.spa_rounded,
-                        color: _mint,
-                        size: 35,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 22),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: onFocus,
-                    icon: Icon(
-                      focusMode ? Icons.pause_rounded : Icons.center_focus_strong_rounded,
-                      size: 20,
-                    ),
-                    label: Text(focusMode ? 'إيقاف وضع التركيز' : 'ابدأ وضع التركيز'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: _mint,
-                      foregroundColor: const Color(0xFF10212A),
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      textStyle: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 14,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                  ),
-                ),
-                if (focusMode) ...[
-                  const SizedBox(height: 12),
-                  const Row(
-                    children: [
-                      Icon(Icons.nights_stay_rounded, size: 16, color: _mint),
-                      SizedBox(width: 7),
-                      Expanded(
-                        child: Text(
-                          'وضع التركيز مفعّل — قلّل المشتتات وخذها خطوة خطوة.',
-                          style: TextStyle(fontSize: 12, color: Colors.white70),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 26),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'ملخص يومك',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-                ),
-              ),
-              Text(
-                _arabicDate(DateTime.now()),
-                style: const TextStyle(fontSize: 11, color: Colors.white54),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.task_alt_rounded,
-                  tint: _mint,
-                  value: '$completedCount',
-                  label: 'مهام مكتملة',
-                  footnote: total == 0 ? 'ابدأ بمهمة جديدة' : 'أحسنت، استمر',
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _StatCard(
-                  icon: Icons.hourglass_bottom_rounded,
-                  tint: _lavender,
-                  value: '$remaining',
-                  label: 'مهام متبقية',
-                  footnote: 'كل شيء بوقته',
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          GlassCard(
-            radius: 21,
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'تقدّمك اليوم',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                    Text(
-                      '${(progress * 100).round()}%',
-                      style: const TextStyle(
-                        color: _mint,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(20),
-                  child: LinearProgressIndicator(
-                    value: progress,
-                    minHeight: 7,
-                    backgroundColor: Colors.white.withOpacity(0.08),
-                    valueColor: const AlwaysStoppedAnimation<Color>(_mint),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 28),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'مهامك القريبة',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-                ),
-              ),
-              TextButton.icon(
-                onPressed: onAdd,
-                icon: const Icon(Icons.add_rounded, size: 18),
-                label: const Text('إضافة'),
-                style: TextButton.styleFrom(foregroundColor: _mint),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          if (tasks.isEmpty)
-            const _EmptyState(
-              title: 'ما عندك مهام حاليًا',
-              subtitle: 'أضف مهمة صغيرة وابدأ يومك بهدوء.',
-              icon: Icons.spa_rounded,
-            )
-          else
-            ...tasks.take(3).map(
-                  (task) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _TaskTile(task: task, onToggle: onToggle),
-                  ),
-                ),
-          const SizedBox(height: 4),
-          Center(
-            child: TextButton.icon(
-              onPressed: () => onNavigate(1),
-              icon: const Icon(Icons.arrow_back_rounded, size: 17),
-              label: const Text('عرض جميع المهام'),
-              style: TextButton.styleFrom(foregroundColor: Colors.white70),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+        }
+        val brandColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        brandColumn.addView(label("نَوْر", 27f, textPrimary, true))
+        brandColumn.addView(label("NOUR  ·  مساعد ذكاء اصطناعي محلي", 12f, textSecondary))
+        header.addView(brandColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val clearButton = actionButton("محادثة جديدة", false)
+        clearButton.setOnClickListener { resetConversation() }
+        header.addView(clearButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)))
+        root.addView(header)
 
-class TasksScreen extends StatelessWidget {
-  const TasksScreen({
-    super.key,
-    required this.tasks,
-    required this.searchController,
-    required this.onSearch,
-    required this.onAdd,
-    required this.onToggle,
-  });
+        val stateCard = MaterialCardView(this).apply {
+            radius = dp(18).toFloat()
+            cardElevation = 0f
+            setCardBackgroundColor(panel)
+            strokeColor = Color.rgb(42, 54, 78)
+            strokeWidth = dp(1)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(14)
+                bottomMargin = dp(10)
+            }
+        }
+        val stateColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        modelText = label("ماكو نموذج محمّل حالياً", 15f, textPrimary, true)
+        statusText = label("جاري تهيئة المحرك المحلي…", 12f, textSecondary)
+        stateColumn.addView(modelText)
+        stateColumn.addView(statusText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
+        stateCard.addView(stateColumn)
+        root.addView(stateCard)
 
-  final List<_TaskItem> tasks;
-  final TextEditingController searchController;
-  final ValueChanged<String> onSearch;
-  final VoidCallback onAdd;
-  final void Function(_TaskItem task, bool done) onToggle;
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        addModelButton = actionButton("＋ إضافة نموذج", true)
+        modelListButton = actionButton("النماذج", false)
+        toolsButton = actionButton("أدوات الهاتف", false)
+        addModelButton.setOnClickListener { pickModel.launch(arrayOf("*/*")) }
+        modelListButton.setOnClickListener { showModelLibrary() }
+        toolsButton.setOnClickListener { showPhoneTools() }
+        listOf(addModelButton, modelListButton, toolsButton).forEach { button ->
+            controls.addView(button, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+                marginStart = dp(3)
+                marginEnd = dp(3)
+            })
+        }
+        root.addView(controls)
 
-  @override
-  Widget build(BuildContext context) {
-    final doneCount = tasks.where((task) => task.done).length;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 124),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'كل مهامك',
-            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 7),
-          const Text(
-            'خطّط ببساطة، وأنجز على راحتك.',
-            style: TextStyle(color: Colors.white60, fontSize: 13),
-          ),
-          const SizedBox(height: 22),
-          GlassCard(
-            radius: 18,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            child: TextField(
-              controller: searchController,
-              onChanged: onSearch,
-              textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(
-                icon: Icon(Icons.search_rounded, color: Colors.white54),
-                hintText: 'ابحث عن مهمة...',
-                hintStyle: TextStyle(color: Colors.white38, fontSize: 14),
-                border: InputBorder.none,
-              ),
-            ),
-          ),
-          const SizedBox(height: 18),
-          GlassCard(
-            radius: 21,
-            padding: const EdgeInsets.all(17),
-            child: Row(
-              children: [
-                Container(
-                  width: 47,
-                  height: 47,
-                  decoration: BoxDecoration(
-                    color: _mint.withOpacity(0.11),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: const Icon(Icons.auto_awesome_rounded, color: _mint),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'أنت تتقدم بطريقتك',
-                        style: TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '$doneCount من ${tasks.length} مهام ظاهرة مكتملة',
-                        style: const TextStyle(fontSize: 12, color: Colors.white60),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  onPressed: onAdd,
-                  tooltip: 'إضافة مهمة',
-                  icon: const Icon(Icons.add_circle_rounded, color: _mint, size: 29),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 22),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  'قائمة المهام',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
-                ),
-              ),
-              Text('${tasks.length} مهام', style: const TextStyle(color: Colors.white54, fontSize: 12)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (tasks.isEmpty)
-            _EmptyState(
-              title: searchController.text.trim().isEmpty
-                  ? 'قائمتك فارغة الآن'
-                  : 'ما لقينا هذه المهمة',
-              subtitle: searchController.text.trim().isEmpty
-                  ? 'أضف أول مهمة وخلي البداية بسيطة.'
-                  : 'جرّب كلمة ثانية أو أضف مهمة جديدة.',
-              icon: searchController.text.trim().isEmpty
-                  ? Icons.checklist_rounded
-                  : Icons.search_off_rounded,
-              actionLabel: 'إضافة مهمة',
-              onAction: onAdd,
-            )
-          else
-            ...tasks.map(
-              (task) => Padding(
-                padding: const EdgeInsets.only(bottom: 11),
-                child: _TaskTile(task: task, onToggle: onToggle),
-              ),
-            ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: onAdd,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('أضف مهمة جديدة'),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: _mint,
-                side: BorderSide(color: _mint.withOpacity(0.35)),
-                padding: const EdgeInsets.symmetric(vertical: 15),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+        messagesScroll = ScrollView(this).apply {
+            isFillViewport = false
+            clipToPadding = false
+            setPadding(0, dp(8), 0, dp(8))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        messagesContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        messagesScroll.addView(messagesContainer)
+        root.addView(messagesScroll)
 
-class SettingsScreen extends StatelessWidget {
-  const SettingsScreen({
-    super.key,
-    required this.focusMode,
-    required this.notifications,
-    required this.sounds,
-    required this.onFocusChanged,
-    required this.onNotificationsChanged,
-    required this.onSoundsChanged,
-  });
+        val inputCard = MaterialCardView(this).apply {
+            radius = dp(20).toFloat()
+            cardElevation = 0f
+            setCardBackgroundColor(panelRaised)
+            strokeColor = Color.rgb(48, 62, 88)
+            strokeWidth = dp(1)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(5)
+            }
+        }
+        val composer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setPadding(dp(7), dp(5), dp(7), dp(5))
+        }
+        inputText = EditText(this).apply {
+            hint = "اكتب رسالتك أو أمراً للهاتف…"
+            setHintTextColor(textSecondary)
+            setTextColor(textPrimary)
+            textSize = 15f
+            background = null
+            minHeight = dp(48)
+            maxLines = 5
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            imeOptions = EditorInfo.IME_ACTION_SEND
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        sendButton = actionButton("إرسال", true).apply {
+            minWidth = dp(68)
+            setOnClickListener { sendCurrentMessage() }
+        }
+        inputText.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                sendCurrentMessage()
+                true
+            } else false
+        }
+        composer.addView(inputText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        composer.addView(sendButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(46)))
+        inputCard.addView(composer)
+        root.addView(inputCard)
+        root.addView(label("المعالجة داخل الجهاز • لا حاجة إلى API", 10f, textSecondary).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, dp(7), 0, 0)
+        })
+    }
 
-  final bool focusMode;
-  final bool notifications;
-  final bool sounds;
-  final ValueChanged<bool> onFocusChanged;
-  final ValueChanged<bool> onNotificationsChanged;
-  final ValueChanged<bool> onSoundsChanged;
+    private fun label(value: String, size: Float, color: Int, bold: Boolean = false): TextView = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(color)
+        if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+        gravity = Gravity.CENTER_VERTICAL
+        textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 124),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'الإعدادات',
-            style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 7),
-          const Text(
-            'خلّي التجربة مناسبة إلك.',
-            style: TextStyle(color: Colors.white60, fontSize: 13),
-          ),
-          const SizedBox(height: 26),
-          const _SettingsSectionTitle(title: 'تفضيلاتك'),
-          const SizedBox(height: 12),
-          GlassCard(
-            radius: 22,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Column(
-              children: [
-                _SettingRow(
-                  icon: Icons.center_focus_strong_rounded,
-                  tint: _mint,
-                  title: 'وضع التركيز',
-                  subtitle: 'قلّل المشتتات وخذ وقتك',
-                  value: focusMode,
-                  onChanged: onFocusChanged,
-                ),
-                Divider(height: 1, color: Colors.white.withOpacity(0.08)),
-                _SettingRow(
-                  icon: Icons.notifications_none_rounded,
-                  tint: _lavender,
-                  title: 'التنبيهات',
-                  subtitle: 'تفضيل التنبيهات داخل التطبيق',
-                  value: notifications,
-                  onChanged: onNotificationsChanged,
-                ),
-                Divider(height: 1, color: Colors.white.withOpacity(0.08)),
-                _SettingRow(
-                  icon: Icons.volume_up_rounded,
-                  tint: _peach,
-                  title: 'الأصوات',
-                  subtitle: 'حفظ تفضيل الصوت للتجربة',
-                  value: sounds,
-                  onChanged: onSoundsChanged,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 26),
-          const _SettingsSectionTitle(title: 'عن التطبيق'),
-          const SizedBox(height: 12),
-          GlassCard(
-            radius: 22,
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(colors: [_mint, _softBlue]),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: const Icon(Icons.spa_rounded, color: Color(0xFF10212A), size: 27),
-                    ),
-                    const SizedBox(width: 12),
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('نَسيم', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-                          SizedBox(height: 4),
-                          Text('مساحة هادئة لتنظيم يومك', style: TextStyle(fontSize: 12, color: Colors.white60)),
-                        ],
-                      ),
-                    ),
-                    const Text('1.0', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  ],
-                ),
-                const SizedBox(height: 17),
-                const Text(
-                  'صُمّم هذا النموذج بواجهة زجاجية هادئة. المهام والإعدادات تعمل داخل التطبيق خلال الجلسة الحالية، ولا يحتاج إلى اتصال بالإنترنت أو مكتبات خارجية.',
-                  style: TextStyle(fontSize: 13, height: 1.7, color: Colors.white70),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Icon(Icons.shield_outlined, size: 17, color: _mint.withOpacity(0.9)),
-                    const SizedBox(width: 7),
-                    const Expanded(
-                      child: Text(
-                        'لا يرسل هذا النموذج بياناتك إلى أي خدمة خارجية.',
-                        style: TextStyle(fontSize: 11, color: Colors.white54),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 18),
-          const Center(
-            child: Text(
-              'تمهّل قليلًا؛ أنت مو مطالب بكل شيء دفعة واحدة.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: Colors.white38, height: 1.7),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+    private fun actionButton(value: String, primary: Boolean): MaterialButton = MaterialButton(this).apply {
+        text = value
+        textSize = 12.5f
+        isAllCaps = false
+        cornerRadius = dp(13)
+        insetTop = 0
+        insetBottom = 0
+        setTextColor(if (primary) Color.rgb(12, 20, 39) else textPrimary)
+        backgroundTintList = android.content.res.ColorStateList.valueOf(if (primary) accent else panelRaised)
+        strokeWidth = if (primary) 0 else dp(1)
+        strokeColor = android.content.res.ColorStateList.valueOf(Color.rgb(57, 70, 99))
+        elevation = 0f
+    }
 
-class _SettingRow extends StatelessWidget {
-  const _SettingRow({
-    required this.icon,
-    required this.tint,
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.onChanged,
-  });
+    private fun addBubble(role: String, text: String): TextView {
+        val isUser = role == "user"
+        val card = MaterialCardView(this).apply {
+            radius = dp(18).toFloat()
+            cardElevation = 0f
+            setCardBackgroundColor(if (isUser) userBubble else aiBubble)
+            strokeColor = if (isUser) Color.rgb(66, 91, 143) else Color.rgb(40, 53, 76)
+            strokeWidth = dp(1)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(5)
+                bottomMargin = dp(5)
+            }
+        }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(11), dp(14), dp(11))
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        column.addView(label(if (isUser) "أنت" else "نَوْر", 11f, if (isUser) Color.rgb(190, 207, 255) else accent, true))
+        val body = TextView(this).apply {
+            this.text = text
+            textSize = 15.5f
+            setTextColor(textPrimary)
+            textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+            setTextIsSelectable(true)
+            setLineSpacing(dp(2).toFloat(), 1.05f)
+            setPadding(0, dp(5), 0, 0)
+        }
+        column.addView(body)
+        if (!isUser) {
+            val actions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+                layoutDirection = View.LAYOUT_DIRECTION_LTR
+                setPadding(0, dp(4), 0, 0)
+            }
+            val copy = tinyButton("نسخ") { copyText(body.text.toString()) }
+            val share = tinyButton("مشاركة") { shareText(body.text.toString()) }
+            val save = tinyButton("حفظ") { saveText(body.text.toString()) }
+            actions.addView(copy)
+            actions.addView(share)
+            actions.addView(save)
+            column.addView(actions)
+        }
+        card.addView(column)
+        messagesContainer.addView(card)
+        if (text.isNotEmpty()) visibleConversation.add(ChatEntry(role, text))
+        scrollToLatest()
+        return body
+    }
 
-  final IconData icon;
-  final Color tint;
-  final String title;
-  final String subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
+    private fun tinyButton(text: String, click: () -> Unit) = TextView(this).apply {
+        this.text = text
+        textSize = 11f
+        setTextColor(textSecondary)
+        gravity = Gravity.CENTER
+        setPadding(dp(8), dp(6), dp(8), dp(6))
+        setOnClickListener { click() }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          Container(
-            width: 43,
-            height: 43,
-            decoration: BoxDecoration(
-              color: tint.withOpacity(0.11),
-              borderRadius: BorderRadius.circular(15),
-            ),
-            child: Icon(icon, color: tint, size: 22),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 4),
-                Text(subtitle, style: const TextStyle(fontSize: 11, color: Colors.white54)),
-              ],
-            ),
-          ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: _mint,
-            activeTrackColor: _mint.withOpacity(0.30),
-            inactiveTrackColor: Colors.white.withOpacity(0.08),
-          ),
-        ],
-      ),
-    );
-  }
-}
+    private fun scrollToLatest() {
+        messagesScroll.post { messagesScroll.fullScroll(View.FOCUS_DOWN) }
+    }
 
-class _StatCard extends StatelessWidget {
-  const _StatCard({
-    required this.icon,
-    required this.tint,
-    required this.value,
-    required this.label,
-    required this.footnote,
-  });
+    private fun sendCurrentMessage() {
+        val prompt = inputText.text?.toString()?.trim().orEmpty()
+        if (prompt.isEmpty() || isGenerating || isLoading) return
+        inputText.text?.clear()
+        addBubble("user", prompt)
+        if (runPhoneCommand(prompt)) return
 
-  final IconData icon;
-  final Color tint;
-  final String value;
-  final String label;
-  final String footnote;
+        val localEngine = engine
+        if (activeModel == null || localEngine == null) {
+            addBubble("assistant", "أضف نموذج GGUF وحمّله أولاً من أزرار النماذج بالأعلى.")
+            return
+        }
 
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      radius: 22,
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 39,
-            height: 39,
-            decoration: BoxDecoration(
-              color: tint.withOpacity(0.12),
-              borderRadius: BorderRadius.circular(13),
-            ),
-            child: Icon(icon, color: tint, size: 21),
-          ),
-          const SizedBox(height: 15),
-          Text(value, style: const TextStyle(fontSize: 27, fontWeight: FontWeight.w800)),
-          const SizedBox(height: 3),
-          Text(label, style: const TextStyle(fontSize: 12, color: Colors.white70)),
-          const SizedBox(height: 8),
-          Text(footnote, style: TextStyle(fontSize: 10, color: tint.withOpacity(0.9))),
-        ],
-      ),
-    );
-  }
-}
+        isGenerating = true
+        setComposerEnabled(false)
+        statusText.text = "نَوْر يكتب…"
+        val answer = StringBuilder()
+        val answerView = addBubble("assistant", "")
+        val answerEntryIndex = visibleConversation.size
+        generationJob = lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                localEngine.sendUserPrompt(prompt).collect { token ->
+                    withContext(Dispatchers.Main) {
+                        answer.append(token)
+                        answerView.text = answer.toString()
+                        if (answerEntryIndex == visibleConversation.size) {
+                            visibleConversation.add(ChatEntry("assistant", answer.toString()))
+                        } else if (answerEntryIndex < visibleConversation.size) {
+                            visibleConversation[answerEntryIndex] = ChatEntry("assistant", answer.toString())
+                        }
+                        scrollToLatest()
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    if (answer.isEmpty()) answerView.text = "ما وصلني رد نصّي من النموذج."
+                    statusText.text = "جاهز • ${activeModel?.name ?: "بدون نموذج"}"
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    answerView.text = "صار خطأ أثناء التوليد: ${e.message ?: "خطأ غير معروف"}"
+                    statusText.text = "توقّف التوليد بسبب خطأ"
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    isGenerating = false
+                    setComposerEnabled(true)
+                    generationJob = null
+                }
+            }
+        }
+    }
 
-class _TaskTile extends StatelessWidget {
-  const _TaskTile({required this.task, required this.onToggle});
+    private fun setComposerEnabled(enabled: Boolean) {
+        inputText.isEnabled = enabled
+        sendButton.isEnabled = enabled
+        addModelButton.isEnabled = enabled
+        modelListButton.isEnabled = enabled
+        toolsButton.isEnabled = enabled
+    }
 
-  final _TaskItem task;
-  final void Function(_TaskItem task, bool done) onToggle;
+    private suspend fun haltGeneration() {
+        generationJob?.cancelAndJoin()
+        generationJob = null
+        isGenerating = false
+        withContext(Dispatchers.Main) { setComposerEnabled(true) }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      radius: 21,
-      padding: EdgeInsets.zero,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(21),
-          onTap: () => onToggle(task, !task.done),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 14),
-            child: Row(
-              children: [
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  width: 45,
-                  height: 45,
-                  decoration: BoxDecoration(
-                    color: task.tint.withOpacity(task.done ? 0.06 : 0.12),
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                  child: Icon(task.icon, color: task.done ? Colors.white38 : task.tint, size: 22),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        task.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: task.done ? Colors.white38 : Colors.white,
-                          decoration: task.done ? TextDecoration.lineThrough : null,
-                          decorationColor: Colors.white38,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        task.subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11, color: Colors.white54),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Checkbox(
-                  value: task.done,
-                  onChanged: (value) => onToggle(task, value ?? false),
-                  activeColor: _mint,
-                  checkColor: const Color(0xFF10212A),
-                  side: BorderSide(color: Colors.white.withOpacity(0.35), width: 1.4),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+    private fun importModel(uri: Uri) {
+        if (isLoading) return
+        lifecycleScope.launch {
+            isLoading = true
+            setComposerEnabled(false)
+            statusText.text = "جارٍ فحص ملف النموذج…"
+            try {
+                val (file, alreadyExisted) = withContext(Dispatchers.IO) { copyModelIntoPrivateStorage(uri) }
+                statusText.text = if (alreadyExisted) "النموذج موجود مسبقاً في المكتبة" else "تمت إضافة النموذج إلى المكتبة"
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("تمت إضافة النموذج")
+                    .setMessage("${file.name}\nالحجم: ${formatSize(file.length())}\n\nتريد تحميله هسه؟")
+                    .setPositiveButton("تحميل الآن") { _, _ -> activateModel(file) }
+                    .setNegativeButton("لاحقاً", null)
+                    .show()
+            } catch (e: Exception) {
+                statusText.text = "فشلت إضافة النموذج"
+                toast(e.message ?: "تعذر استيراد ملف النموذج")
+            } finally {
+                isLoading = false
+                setComposerEnabled(true)
+            }
+        }
+    }
 
-class _EmptyState extends StatelessWidget {
-  const _EmptyState({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    this.actionLabel,
-    this.onAction,
-  });
+    private fun copyModelIntoPrivateStorage(uri: Uri): Pair<File, Boolean> {
+        val originalName = queryDisplayName(uri) ?: "model-${System.currentTimeMillis()}.gguf"
+        if (!originalName.lowercase(Locale.ROOT).endsWith(".gguf")) {
+            throw IOException("اختر ملفاً ينتهي امتداده بـ .gguf")
+        }
 
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final String? actionLabel;
-  final VoidCallback? onAction;
+        val expectedSize = queryFileSize(uri)
+        if (expectedSize != null && expectedSize > 0L) {
+            val available = StatFs(filesDir.absolutePath).availableBytes
+            if (available < expectedSize + 64L * 1024L * 1024L) {
+                throw IOException("المساحة الحرة داخل التطبيق غير كافية لنسخ النموذج. وفر ${formatSize(expectedSize + 64L * 1024L * 1024L)} تقريباً.")
+            }
+        }
 
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      radius: 23,
-      padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 27),
-      child: Column(
-        children: [
-          Container(
-            width: 58,
-            height: 58,
-            decoration: BoxDecoration(
-              color: _mint.withOpacity(0.10),
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Icon(icon, color: _mint, size: 29),
-          ),
-          const SizedBox(height: 14),
-          Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
-          const SizedBox(height: 7),
-          Text(
-            subtitle,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 12, height: 1.6, color: Colors.white60),
-          ),
-          if (actionLabel != null && onAction != null) ...[
-            const SizedBox(height: 17),
-            TextButton.icon(
-              onPressed: onAction,
-              icon: const Icon(Icons.add_rounded),
-              label: Text(actionLabel!),
-              style: TextButton.styleFrom(foregroundColor: _mint),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
+        contentResolver.openInputStream(uri)?.use { input ->
+            val magic = ByteArray(4)
+            if (input.read(magic) != 4 || String(magic, Charsets.US_ASCII) != "GGUF") {
+                throw IOException("الملف المحدد لا يبدو ملف GGUF صالحاً")
+            }
+        } ?: throw IOException("تعذر فتح الملف المحدد")
 
-class _SettingsSectionTitle extends StatelessWidget {
-  const _SettingsSectionTitle({required this.title});
+        val safeName = originalName.replace(Regex("[^\\p{L}\\p{N}._() -]"), "_").take(120).ifBlank { "model.gguf" }
+        var destination = File(modelsDir, safeName)
+        if (destination.exists()) {
+            if (expectedSize != null && expectedSize > 0L && destination.length() == expectedSize) return destination to true
+            val stem = safeName.removeSuffix(".gguf")
+            destination = File(modelsDir, "$stem-${System.currentTimeMillis()}.gguf")
+        }
+        val partFile = File(modelsDir, destination.name + ".part")
+        if (partFile.exists()) partFile.delete()
+        var copied = 0L
+        var lastUiUpdate = 0L
+        try {
+            contentResolver.openInputStream(uri)?.buffered()?.use { input ->
+                partFile.outputStream().buffered().use { output ->
+                    val buffer = ByteArray(1024 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        copied += count
+                        if (copied - lastUiUpdate >= 64L * 1024L * 1024L) {
+                            lastUiUpdate = copied
+                            runOnUiThread { statusText.text = "جارٍ نسخ النموذج: ${formatSize(copied)}" }
+                        }
+                    }
+                }
+            } ?: throw IOException("تعذر فتح الملف مرة ثانية")
+            if (partFile.length() < 4L) throw IOException("ملف النموذج فارغ أو غير مكتمل")
+            if (!partFile.renameTo(destination)) {
+                partFile.copyTo(destination, overwrite = true)
+                partFile.delete()
+            }
+        } catch (e: Exception) {
+            partFile.delete()
+            throw e
+        }
+        return destination to false
+    }
 
-  final String title;
+    private fun queryDisplayName(uri: Uri): String? = try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else null
+        }
+    } catch (_: Exception) { null }
 
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      title,
-      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: _mint),
-    );
-  }
-}
+    private fun queryFileSize(uri: Uri): Long? = try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+        }
+    } catch (_: Exception) { null }
 
-class _NavigationItem extends StatelessWidget {
-  const _NavigationItem({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
+    private fun showModelLibrary() {
+        val models = modelsDir.listFiles { file -> file.isFile && file.extension.equals("gguf", true) }
+            ?.sortedBy { it.name.lowercase(Locale.ROOT) }.orEmpty()
+        if (models.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("مكتبة النماذج")
+                .setMessage("ما أضفت أي نموذج بعد. اختَر ملف .gguf من زر «إضافة نموذج».")
+                .setPositiveButton("إضافة نموذج") { _, _ -> pickModel.launch(arrayOf("*/*")) }
+                .setNegativeButton("إغلاق", null)
+                .show()
+            return
+        }
+        val labels = models.map { file ->
+            val activeMark = if (activeModel?.absolutePath == file.absolutePath) "  ✓ نشط" else ""
+            "${file.name}\n${formatSize(file.length())}$activeMark"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("نماذجك المحفوظة (${models.size})")
+            .setItems(labels) { _, index -> showModelActions(models[index]) }
+            .setPositiveButton("إضافة نموذج") { _, _ -> pickModel.launch(arrayOf("*/*")) }
+            .setNegativeButton("إغلاق", null)
+            .show()
+    }
 
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
+    private fun showModelActions(file: File) {
+        val active = activeModel?.absolutePath == file.absolutePath
+        val options = if (active) arrayOf("النموذج نشط حالياً", "حذف النموذج من الجهاز") else arrayOf("تحميل هذا النموذج", "حذف النموذج من الجهاز")
+        AlertDialog.Builder(this)
+            .setTitle(file.name)
+            .setMessage("الحجم: ${formatSize(file.length())}\n\nيتم تحميل نموذج واحد فقط في الذاكرة. باقي النماذج تبقى محفوظة وتكدر تبدّل بينها.")
+            .setItems(options) { _, which ->
+                if (which == 0 && !active) activateModel(file)
+                else if (which == 1) confirmDeleteModel(file)
+            }
+            .setNegativeButton("رجوع", null)
+            .show()
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(2),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(18),
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 5),
-            decoration: BoxDecoration(
-              color: selected ? _mint.withOpacity(0.11) : Colors.transparent,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(
-                color: selected ? _mint.withOpacity(0.12) : Colors.transparent,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 21, color: selected ? _mint : Colors.white54),
-                const SizedBox(height: 5),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
-                    color: selected ? _mint : Colors.white54,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+    private fun confirmDeleteModel(file: File) {
+        if (activeModel?.absolutePath == file.absolutePath) {
+            toast("ما تگدر تحذف النموذج النشط. حمّل نموذجاً آخر أولاً.")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("حذف النموذج؟")
+            .setMessage("راح ينحذف الملف من مساحة التطبيق فقط:\n${file.name}")
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("حذف") { _, _ ->
+                val previousSize = file.length()
+                val deleted = file.delete()
+                toast(if (deleted) "تم حذف النموذج وتحرير ${formatSize(previousSize)}" else "تعذر حذف الملف")
+                showModelLibrary()
+            }
+            .show()
+    }
 
-class _AddTaskDialog extends StatefulWidget {
-  const _AddTaskDialog();
+    private fun activateModel(file: File, clearChat: Boolean = true) {
+        if (!file.isFile) {
+            toast("ملف النموذج غير موجود")
+            return
+        }
+        lifecycleScope.launch {
+            isLoading = true
+            try {
+                haltGeneration()
+                setComposerEnabled(false)
+                statusText.text = "جارٍ تحميل ${file.name}…"
+                val localEngine = engine ?: withContext(Dispatchers.IO) { AiChat.getInferenceEngine(applicationContext) }.also { engine = it }
+                awaitEngineReady(localEngine)
+                // The official binding is a singleton and permits one loaded model. Unload the old
+                // native context/model before loading another file to avoid retaining both in RAM.
+                if (activeModel != null) {
+                    localEngine.cleanUp()
+                    activeModel = null
+                    modelPrefs.edit().remove("active_model_path").apply()
+                }
+                withContext(Dispatchers.IO) { localEngine.loadModel(file.absolutePath) }
+                activeModel = file
+                modelPrefs.edit().putString("active_model_path", file.absolutePath).apply()
+                modelText.text = "النموذج النشط: ${file.name}"
+                statusText.text = "جاهز • ${formatSize(file.length())} • معالجة محلية"
+                if (clearChat) {
+                    messagesContainer.removeAllViews()
+                    visibleConversation.clear()
+                    addBubble("assistant", "تم تحميل ${file.name}. المحادثة الجديدة بدأت مع هذا النموذج.")
+                }
+            } catch (e: Exception) {
+                if (activeModel == null) modelText.text = "ماكو نموذج محمّل حالياً"
+                statusText.text = "فشل تحميل النموذج"
+                toast("تعذر تحميل النموذج: ${e.message ?: "قد يكون كبيراً على الذاكرة المتاحة أو غير متوافق"}")
+            } finally {
+                isLoading = false
+                setComposerEnabled(true)
+            }
+        }
+    }
 
-  @override
-  State<_AddTaskDialog> createState() => _AddTaskDialogState();
-}
+    private suspend fun awaitEngineReady(localEngine: InferenceEngine) {
+        val state = localEngine.state.first {
+            it is InferenceEngine.State.Initialized ||
+                it is InferenceEngine.State.ModelReady ||
+                it is InferenceEngine.State.Error
+        }
+        if (state is InferenceEngine.State.Error) throw state.exception
+    }
 
-class _AddTaskDialogState extends State<_AddTaskDialog> {
-  final TextEditingController _controller = TextEditingController();
+    private fun resetConversation() {
+        val file = activeModel
+        if (file == null) {
+            messagesContainer.removeAllViews()
+            visibleConversation.clear()
+            addBubble("assistant", "أضف نموذجاً أولاً حتى نبدأ محادثة جديدة.")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("بدء محادثة جديدة")
+            .setMessage("راح أعيد تحميل النموذج نفسه لمسح سياق المحادثة الحالي. قد يستغرق التحميل لحظات.")
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("متابعة") { _, _ -> activateModel(file, clearChat = true) }
+            .show()
+    }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+    /** Run a few predictable device actions; everything else goes to the local model. */
+    private fun runPhoneCommand(original: String): Boolean {
+        val command = original.trim().lowercase(Locale.ROOT)
+        return when {
+            command in listOf("افتح الإعدادات", "افتح الاعدادات", "افتح إعدادات الهاتف", "افتح اعدادات الهاتف") -> launchAction(Intent(Settings.ACTION_SETTINGS), "فتحت إعدادات الهاتف.")
+            command in listOf("افتح الواي فاي", "افتح إعدادات الواي فاي", "افتح اعدادات الواي فاي") -> launchAction(Intent(Settings.ACTION_WIFI_SETTINGS), "فتحت إعدادات الواي فاي. التغيير النهائي يبقى بيدك من إعدادات النظام.")
+            command in listOf("افتح البلوتوث", "افتح إعدادات البلوتوث", "افتح اعدادات البلوتوث") -> launchAction(Intent(Settings.ACTION_BLUETOOTH_SETTINGS), "فتحت إعدادات البلوتوث.")
+            command in listOf("افتح إعدادات التطبيقات", "افتح اعدادات التطبيقات") -> launchAction(Intent(Settings.ACTION_APPLICATION_SETTINGS), "فتحت إعدادات التطبيقات.")
+            command in listOf("افتح إعدادات الصوت", "افتح اعدادات الصوت") -> launchAction(Intent(Settings.ACTION_SOUND_SETTINGS), "فتحت إعدادات الصوت.")
+            command in listOf("ارفع الصوت", "علي الصوت", "زود الصوت") -> adjustVolume(AudioManager.ADJUST_RAISE, "رفعت صوت الوسائط درجة واحدة.")
+            command in listOf("خفض الصوت", "وطي الصوت", "نزل الصوت") -> adjustVolume(AudioManager.ADJUST_LOWER, "خفضت صوت الوسائط درجة واحدة.")
+            command.startsWith("افتح تطبيق ") -> {
+                val appName = original.substringAfter("افتح تطبيق ", "").trim()
+                launchAppByName(appName)
+            }
+            command.startsWith("ابحث عن ") -> {
+                val query = original.substringAfter("ابحث عن ", "").trim()
+                if (query.isBlank()) false else {
+                    val url = "https://www.google.com/search?q=" + URLEncoder.encode(query, "UTF-8")
+                    launchAction(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "فتحت المتصفح للبحث عن: $query")
+                }
+            }
+            command.startsWith("اتصل بـ ") || command.startsWith("اتصل ب ") -> {
+                val number = original.substringAfter(if (command.startsWith("اتصل بـ ")) "اتصل بـ " else "اتصل ب ").trim()
+                if (number.isBlank()) false else launchAction(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)), "فتحت تطبيق الاتصال. راجع الرقم واضغط اتصال بنفسك.")
+            }
+            command in listOf("شغل الفلاش", "شغّل الفلاش", "اطفئ الفلاش", "طفي الفلاش") -> {
+                val wanted = command in listOf("شغل الفلاش", "شغّل الفلاش")
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) setTorch(wanted)
+                else {
+                    requestedTorchState = wanted
+                    askForCamera.launch(Manifest.permission.CAMERA)
+                }
+                addBubble("assistant", if (wanted) "طلبت تشغيل الفلاش." else "طلبت إطفاء الفلاش.")
+                true
+            }
+            else -> false
+        }
+    }
 
-  void _submit() {
-    final value = _controller.text.trim();
-    if (value.isNotEmpty) Navigator.of(context).pop(value);
-  }
+    private fun launchAction(intent: Intent, successMessage: String): Boolean {
+        return try {
+            startActivity(intent)
+            if (successMessage.isNotBlank()) addBubble("assistant", successMessage)
+            true
+        } catch (e: ActivityNotFoundException) {
+            addBubble("assistant", "هذا الخيار غير متوفر على جهازك.")
+            true
+        } catch (e: Exception) {
+            addBubble("assistant", "تعذر تنفيذ الإجراء: ${e.message ?: "خطأ غير معروف"}")
+            true
+        }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 22),
-      child: GlassCard(
-        radius: 27,
-        padding: const EdgeInsets.all(22),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 47,
-              height: 47,
-              decoration: BoxDecoration(
-                color: _mint.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: const Icon(Icons.add_task_rounded, color: _mint, size: 25),
-            ),
-            const SizedBox(height: 16),
-            const Text('مهمة جديدة', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 7),
-            const Text(
-              'اكتب شيئًا تريد إنجازه، ولو كان بسيطًا.',
-              style: TextStyle(fontSize: 12, color: Colors.white60, height: 1.6),
-            ),
-            const SizedBox(height: 18),
-            TextField(
-              controller: _controller,
-              autofocus: true,
-              maxLength: 80,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: 'عنوان المهمة',
-                filled: true,
-                fillColor: Colors.white.withOpacity(0.045),
-                counterStyle: const TextStyle(color: Colors.white38, fontSize: 10),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(15),
-                  borderSide: BorderSide(color: Colors.white.withOpacity(0.10)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(15),
-                  borderSide: BorderSide(color: _mint.withOpacity(0.65)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    style: TextButton.styleFrom(foregroundColor: Colors.white70, padding: const EdgeInsets.symmetric(vertical: 13)),
-                    child: const Text('إلغاء'),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _submit,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: _mint,
-                      foregroundColor: const Color(0xFF10212A),
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    ),
-                    child: const Text('إضافة المهمة', style: TextStyle(fontWeight: FontWeight.w800)),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+    private fun adjustVolume(direction: Int, message: String): Boolean {
+        try {
+            val audio = getSystemService(AUDIO_SERVICE) as AudioManager
+            audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
+            addBubble("assistant", message)
+        } catch (e: Exception) {
+            addBubble("assistant", "تعذر تغيير الصوت: ${e.message ?: "خطأ غير معروف"}")
+        }
+        return true
+    }
 
-class GlassCard extends StatelessWidget {
-  const GlassCard({
-    super.key,
-    required this.child,
-    this.padding = const EdgeInsets.all(16),
-    this.radius = 22,
-  });
+    private fun launchAppByName(query: String): Boolean {
+        val apps = getLauncherApps()
+        val found = apps.firstOrNull { it.loadLabel(packageManager).toString().contains(query, true) }
+        if (found == null) {
+            addBubble("assistant", "ما لقيت تطبيق باسم «$query». افتح «أدوات الهاتف» ثم «فتح تطبيق» واختاره من القائمة.")
+            return true
+        }
+        return try {
+            val intent = packageManager.getLaunchIntentForPackage(found.activityInfo.packageName)
+            if (intent != null) {
+                startActivity(intent)
+                addBubble("assistant", "فتحت تطبيق ${found.loadLabel(packageManager)}.")
+            } else addBubble("assistant", "ما گدرت أفتح هذا التطبيق من النظام.")
+            true
+        } catch (e: Exception) {
+            addBubble("assistant", "تعذر فتح التطبيق: ${e.message ?: "خطأ غير معروف"}")
+            true
+        }
+    }
 
-  final Widget child;
-  final EdgeInsetsGeometry padding;
-  final double radius;
+    private fun getLauncherApps(): List<ResolveInfo> {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        @Suppress("DEPRECATION")
+        val result = packageManager.queryIntentActivities(intent, 0)
+        return result.distinctBy { it.activityInfo.packageName }.sortedBy { it.loadLabel(packageManager).toString().lowercase(Locale.ROOT) }
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.055),
-            borderRadius: BorderRadius.circular(radius),
-            border: Border.all(color: Colors.white.withOpacity(0.105), width: 1),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.10),
-                blurRadius: 24,
-                offset: const Offset(0, 9),
-              ),
-            ],
-          ),
-          child: child,
-        ),
-      ),
-    );
-  }
-}
+    private fun showPhoneTools() {
+        val choices = arrayOf(
+            "فتح تطبيق من الهاتف",
+            "إعدادات الهاتف",
+            "إعدادات الواي فاي",
+            "إعدادات البلوتوث",
+            "إعدادات الصوت",
+            "رفع الصوت",
+            "خفض الصوت",
+            "تشغيل / إطفاء الفلاش",
+            "البحث في الويب",
+            "فتح لوحة الاتصال",
+            "كتابة رسالة SMS",
+            "إنشاء ملف ملاحظة",
+            "مشاركة آخر رد من نَوْر"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("أدوات الهاتف")
+            .setItems(choices) { _, index ->
+                when (index) {
+                    0 -> showInstalledApps()
+                    1 -> launchAction(Intent(Settings.ACTION_SETTINGS), "")
+                    2 -> launchAction(Intent(Settings.ACTION_WIFI_SETTINGS), "")
+                    3 -> launchAction(Intent(Settings.ACTION_BLUETOOTH_SETTINGS), "")
+                    4 -> launchAction(Intent(Settings.ACTION_SOUND_SETTINGS), "")
+                    5 -> adjustVolume(AudioManager.ADJUST_RAISE, "رفعت صوت الوسائط.")
+                    6 -> adjustVolume(AudioManager.ADJUST_LOWER, "خفضت صوت الوسائط.")
+                    7 -> {
+                        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) changeTorch()
+                        else askForCamera.launch(Manifest.permission.CAMERA)
+                    }
+                    8 -> askSearchQuery()
+                    9 -> askPhoneNumber()
+                    10 -> askSmsDetails()
+                    11 -> askNoteText()
+                    12 -> shareLastAnswer()
+                }
+            }
+            .setNegativeButton("إغلاق", null)
+            .show()
+    }
 
-class _AmbientBackground extends StatelessWidget {
-  const _AmbientBackground();
+    private fun showInstalledApps() {
+        val apps = getLauncherApps()
+        if (apps.isEmpty()) {
+            toast("ما ظهرت تطبيقات قابلة للفتح.")
+            return
+        }
+        val labels = apps.map { it.loadLabel(packageManager).toString() }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("اختَر تطبيقاً")
+            .setAdapter(ArrayAdapter(this, android.R.layout.simple_list_item_1, labels)) { _, index ->
+                val item = apps[index]
+                val launchIntent = packageManager.getLaunchIntentForPackage(item.activityInfo.packageName)
+                if (launchIntent != null) launchAction(launchIntent, "تم فتح ${labels[index]}.")
+                else toast("ما متوفر أمر تشغيل لهذا التطبيق.")
+            }
+            .setNegativeButton("إغلاق", null)
+            .show()
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topRight,
-            end: Alignment.bottomLeft,
-            colors: [Color(0xFF142338), _background, Color(0xFF101522)],
-            stops: [0.0, 0.52, 1.0],
-          ),
-        ),
-        child: Stack(
-          children: [
-            Positioned(
-              top: -110,
-              right: -95,
-              child: _GlowOrb(size: 310, color: const Color(0xFF3AAEAA).withOpacity(0.24)),
-            ),
-            Positioned(
-              top: 300,
-              left: -155,
-              child: _GlowOrb(size: 330, color: const Color(0xFF8067D9).withOpacity(0.16)),
-            ),
-            Positioned(
-              bottom: -170,
-              right: -70,
-              child: _GlowOrb(size: 290, color: const Color(0xFF508FC5).withOpacity(0.12)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+    private fun changeTorch() = setTorch(!torchEnabled)
 
-class _GlowOrb extends StatelessWidget {
-  const _GlowOrb({required this.size, required this.color});
+    private fun setTorch(enabled: Boolean) {
+        try {
+            val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val id = cameraManager.cameraIdList.firstOrNull { cameraId ->
+                cameraManager.getCameraCharacteristics(cameraId).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: run { toast("هذا الجهاز ما أعلن عن فلاش متاح."); return }
+            cameraManager.setTorchMode(id, enabled)
+            torchEnabled = enabled
+            toast(if (torchEnabled) "الفلاش شغّال" else "الفلاش مطفأ")
+        } catch (e: Exception) {
+            toast("تعذر التحكم بالفلاش: ${e.message ?: "راجع إذن الكاميرا"}")
+        }
+    }
 
-  final double size;
-  final Color color;
+    private fun askSearchQuery() {
+        val edit = EditText(this).apply { hint = "شنو تريد تبحث عنه؟"; setTextColor(textPrimary); setHintTextColor(textSecondary) }
+        AlertDialog.Builder(this).setTitle("بحث في الويب").setView(edit)
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("بحث") { _, _ ->
+                val query = edit.text.toString().trim()
+                if (query.isNotBlank()) {
+                    val url = "https://www.google.com/search?q=" + URLEncoder.encode(query, "UTF-8")
+                    launchAction(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "فتحت المتصفح للبحث عن: $query")
+                }
+            }.show()
+    }
 
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          gradient: RadialGradient(
-            colors: [color, color.withOpacity(0.18), Colors.transparent],
-            stops: const [0.0, 0.45, 1.0],
-          ),
-        ),
-      ),
-    );
-  }
-}
+    private fun askPhoneNumber() {
+        val edit = EditText(this).apply {
+            hint = "رقم الهاتف"
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+            setTextColor(textPrimary)
+            setHintTextColor(textSecondary)
+        }
+        AlertDialog.Builder(this).setTitle("فتح لوحة الاتصال").setView(edit)
+            .setMessage("التطبيق يفتح لوحة الاتصال فقط، ولا يجري مكالمة دون تدخلك.")
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("متابعة") { _, _ ->
+                val number = edit.text.toString().trim()
+                if (number.isNotBlank()) launchAction(Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", number, null)), "راجع الرقم ثم اضغط اتصال بنفسك.")
+            }.show()
+    }
 
-String _arabicDate(DateTime date) {
-  const weekdays = [
-    'الاثنين',
-    'الثلاثاء',
-    'الأربعاء',
-    'الخميس',
-    'الجمعة',
-    'السبت',
-    'الأحد',
-  ];
-  const months = [
-    'يناير',
-    'فبراير',
-    'مارس',
-    'أبريل',
-    'مايو',
-    'يونيو',
-    'يوليو',
-    'أغسطس',
-    'سبتمبر',
-    'أكتوبر',
-    'نوفمبر',
-    'ديسمبر',
-  ];
-  final weekday = weekdays[(date.weekday - 1) % 7];
-  final month = months[(date.month - 1) % 12];
-  return '$weekday، ${date.day} $month';
+    private fun askSmsDetails() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0) }
+        val number = EditText(this).apply { hint = "رقم المستلم"; inputType = android.text.InputType.TYPE_CLASS_PHONE; setTextColor(textPrimary); setHintTextColor(textSecondary) }
+        val body = EditText(this).apply { hint = "نص الرسالة"; minLines = 3; gravity = Gravity.TOP; setTextColor(textPrimary); setHintTextColor(textSecondary) }
+        box.addView(number)
+        box.addView(body)
+        AlertDialog.Builder(this).setTitle("كتابة رسالة SMS").setView(box)
+            .setMessage("راح تنفتح تطبيق الرسائل مع النص جاهز. أنت تقرر إذا ترسله.")
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("فتح الرسائل") { _, _ ->
+                val phone = number.text.toString().trim()
+                val message = body.text.toString()
+                if (phone.isNotBlank()) {
+                    val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(phone)}")).putExtra("sms_body", message)
+                    launchAction(intent, "فتحت تطبيق الرسائل. ما انرسلت الرسالة تلقائياً.")
+                } else toast("اكتب رقم المستلم أولاً.")
+            }.show()
+    }
+
+    private fun askNoteText() {
+        val edit = EditText(this).apply {
+            hint = "اكتب الملاحظة هنا…"
+            minLines = 4
+            gravity = Gravity.TOP
+            setTextColor(textPrimary)
+            setHintTextColor(textSecondary)
+        }
+        AlertDialog.Builder(this).setTitle("إنشاء ملاحظة").setView(edit)
+            .setNegativeButton("إلغاء", null)
+            .setPositiveButton("حفظ إلى ملف") { _, _ ->
+                val text = edit.text.toString()
+                if (text.isNotBlank()) {
+                    pendingExportText = text
+                    pendingExportName = "NOUR-note-${System.currentTimeMillis()}.txt"
+                    exportFile.launch(pendingExportName)
+                }
+            }.show()
+    }
+
+    private fun copyText(text: String) {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("NOUR", text))
+        toast("تم نسخ النص.")
+    }
+
+    private fun shareText(text: String) {
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            startActivity(Intent.createChooser(intent, "مشاركة النص"))
+        } catch (e: Exception) {
+            toast("تعذرت مشاركة النص.")
+        }
+    }
+
+    private fun saveText(text: String) {
+        pendingExportText = text
+        pendingExportName = "NOUR-response-${System.currentTimeMillis()}.txt"
+        exportFile.launch(pendingExportName)
+    }
+
+    private fun shareLastAnswer() {
+        val last = visibleConversation.lastOrNull { it.role == "assistant" }?.text
+        if (last.isNullOrBlank()) toast("ماكو رد حتى أشاركه.") else shareText(last)
+    }
+
+    private fun formatSize(bytes: Long): String {
+        if (bytes < 1024L) return "$bytes B"
+        val units = arrayOf("KB", "MB", "GB", "TB")
+        var value = bytes.toDouble()
+        var index = -1
+        do { value /= 1024.0; index++ } while (value >= 1024.0 && index < units.lastIndex)
+        return "${DecimalFormat("#,##0.0").format(value)} ${units[index]}"
+    }
+
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    override fun onDestroy() {
+        generationJob?.cancel()
+        try { engine?.destroy() } catch (_: Exception) {}
+        super.onDestroy()
+    }
 }
